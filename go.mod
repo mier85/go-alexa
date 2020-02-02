@@ -1,4 +1,4 @@
-module github.com/mier85/go-alexa
+module github.com/mikeflynn/go-alexa
 
 go 1.13
 
