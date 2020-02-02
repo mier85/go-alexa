@@ -1,0 +1,6 @@
+github.com/gorilla/mux v1.7.3 h1:gnP5JzjVOuiZD07fKKToCAOjS0yOpj/qPETTXCCS6hw=
+github.com/gorilla/mux v1.7.3/go.mod h1:1lud6UwP+6orDFRuTfBEV8e9/aOM/c4fVVCaMa2zaAs=
+github.com/mikeflynn/go-alexa v0.0.0-20191016174603-1ffcf485965f h1:3BS3186POgfZZrTiSC89AatGHuoxcmDg0u3LLxvLfuI=
+github.com/mikeflynn/go-alexa v0.0.0-20191016174603-1ffcf485965f/go.mod h1:DFVRQFshZz/vfj7i8nu+qGq3/ipm2Uq4hMb1jdMaQyw=
+github.com/urfave/negroni v1.0.0 h1:kIimOitoypq34K7TG7DUaJ9kq/N4Ofuwi1sjz0KipXc=
+github.com/urfave/negroni v1.0.0/go.mod h1:Meg73S6kFm/4PpbYdq35yYWoCZ9mS/YSx+lKnmiohz4=
