@@ -11,8 +11,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -52,7 +52,6 @@ var (
 	applications       = map[string]interface{}{}
 	rootPrefix         = "/"
 	echoPrefix         = "/echo/"
-	insecureSkipVerify = false
 )
 
 // SetEchoPrefix provides a way to specify a single path prefix that all EchoApplications will share.SetEchoPrefix
@@ -68,10 +67,36 @@ func SetRootPrefix(prefix string) {
 	rootPrefix = prefix
 }
 
+type configurator struct {
+	requestValidatorOptions []RequestValidatorOption
+}
+
+func newConfigurator(options []SkillServerOption) *configurator {
+	c := &configurator{requestValidatorOptions: make([]RequestValidatorOption, 0)}
+	c.apply(options)
+	return c
+}
+
+func (c *configurator) apply(options []SkillServerOption) {
+	for _, option := range options {
+		option(c)
+	}
+}
+
+type SkillServerOption func(c *configurator)
+
+func WithRequestValidatorOptions(option RequestValidatorOption) SkillServerOption {
+	return func(c *configurator) {
+		c.requestValidatorOptions = append(c.requestValidatorOptions, option)
+	}
+}
+
 // Run will initialize the apps provided and start an HTTP server listening on the specified port.
-func Run(apps map[string]interface{}, port string) {
+func Run(apps map[string]interface{}, port string, options ...SkillServerOption)  {
 	router := mux.NewRouter()
-	initialize(apps, router)
+	if err := initialize(apps, router, options...); nil != err {
+		log.Fatal(err)
+	}
 
 	n := negroni.Classic()
 	n.UseHandler(router)
@@ -86,9 +111,11 @@ func Run(apps map[string]interface{}, port string) {
 // logged to the stdout and no error is returned.
 // For generating a testing cert and key, read the following:
 // https://developer.amazon.com/docs/custom-skills/configure-web-service-self-signed-certificate.html
-func RunSSL(apps map[string]interface{}, port, cert, key string) {
+func RunSSL(apps map[string]interface{}, port, cert, key string, options ...SkillServerOption) {
 	router := mux.NewRouter()
-	initialize(apps, router)
+	if err := initialize(apps, router, options...); nil != err {
+		log.Fatal(err)
+	}
 
 	// This is very limited TLS configuration which is required to connect alexa to our webservice.
 	// The curve preferences are used by ECDSA/ECDHE algorithms for figuring out the matching algorithm
@@ -136,10 +163,11 @@ func RunSSL(apps map[string]interface{}, port, cert, key string) {
 	log.Fatal(srv.ListenAndServeTLS(cert, key))
 }
 
-func initialize(apps map[string]interface{}, router *mux.Router) {
-	flag.BoolVar(&insecureSkipVerify, "insecure-skip-verify", false, "Skip certificate checks for downloading from AWS")
+func initialize(apps map[string]interface{}, router *mux.Router, options ...SkillServerOption) error {
+	configurator := newConfigurator(options)
+	insecureSkipVerify := flag.Bool("insecure-skip-verify", false, "Skip certificate checks for downloading from AWS")
 	flag.Parse()
-	if insecureSkipVerify {
+	if *insecureSkipVerify == false {
 		log.Println("insecure skip verify, certs will not be checked")
 	}
 	applications = apps
@@ -194,8 +222,17 @@ func initialize(apps map[string]interface{}, router *mux.Router) {
 		}
 	}
 
+	// prepend with insecureSkipVerify flag so it can still be overwritten
+	configurator.requestValidatorOptions = append([]RequestValidatorOption{WithInsecureSkipVerify(*insecureSkipVerify)}, configurator.requestValidatorOptions...)
+
+	requestValidator, err := NewRequestValidator(
+		configurator.requestValidatorOptions...,
+	)
+	if nil != err {
+		return fmt.Errorf("failed initializing request validator: %w", err)
+	}
 	router.PathPrefix(echoPrefix).Handler(negroni.New(
-		negroni.HandlerFunc(validateRequest),
+		negroni.HandlerFunc(requestValidator.validateRequest),
 		negroni.HandlerFunc(verifyJSON),
 		negroni.Wrap(echoRouter),
 	))
@@ -205,6 +242,7 @@ func initialize(apps map[string]interface{}, router *mux.Router) {
 			negroni.Wrap(pageRouter),
 		))
 	}
+	return nil
 }
 
 // GetEchoRequest is a convenience method for retrieving and casting an `EchoRequest` out of a
@@ -249,15 +287,65 @@ func verifyJSON(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 	next(w, r)
 }
 
+type RequestValidator struct {
+	client *http.Client
+	insecureSkipVerify bool
+	timeout time.Duration
+}
+
+type RequestValidatorOption func(r *RequestValidator)
+
+func WithRequestValidatorTimeout(timeout time.Duration) func(r *RequestValidator) {
+	return func(r *RequestValidator) {
+		r.timeout = timeout
+	}
+}
+
+func WithInsecureSkipVerify(insecureSkipVerify bool) func(r *RequestValidator) {
+	return func(r *RequestValidator) {
+		r.insecureSkipVerify = insecureSkipVerify
+	}
+}
+
+func NewRequestValidator(options ...RequestValidatorOption) (RequestValidator, error) {
+	certPool, err := x509.SystemCertPool()
+	if err != nil {
+		return RequestValidator{}, fmt.Errorf("can't open system cert pool: %w", err)
+	}
+	if certPool == nil {
+		return RequestValidator{}, fmt.Errorf("certpool is empty")
+	}
+
+	r := RequestValidator{
+		timeout: time.Second * 5,
+	}
+	for _, option := range options {
+		option(&r)
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: certPool, InsecureSkipVerify: r.insecureSkipVerify},
+	}
+
+	if r.client == nil {
+		r.client = &http.Client{
+			Timeout:r.timeout,
+			Transport: tr,
+		}
+	}
+
+	return r, nil
+}
+
 // Run all mandatory Amazon security checks on the request.
-func validateRequest(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	devFlag := r.URL.Query().Get("_dev")
+func (r RequestValidator) validateRequest(w http.ResponseWriter, req *http.Request, next http.HandlerFunc) {
+	devFlag := req.URL.Query().Get("_dev")
 	isDev := devFlag != ""
-	if !isDev && !IsValidAlexaRequest(w, r) {
+	if !isDev && !r.IsValidAlexaRequest(w, req) {
 		log.Println("Request invalid")
 		return
 	}
-	next(w, r)
+	next(w, req)
 }
 
 // IsValidAlexaRequest handles all the necessary steps to validate that an incoming http.Request has actually come from
@@ -265,11 +353,11 @@ func validateRequest(w http.ResponseWriter, r *http.Request, next http.HandlerFu
 // The required steps for request validation can be found on this page:
 // --insecure-skip-verify flag will disable all validations
 // https://developer.amazon.com/public/solutions/alexa/alexa-skills-kit/docs/developing-an-alexa-skill-as-a-web-service#hosting-a-custom-skill-as-a-web-service
-func IsValidAlexaRequest(w http.ResponseWriter, r *http.Request) bool {
-	if insecureSkipVerify {
+func (r RequestValidator) IsValidAlexaRequest(w http.ResponseWriter, request *http.Request) bool {
+	if r.insecureSkipVerify {
 		return true
 	}
-	certURL := r.Header.Get("SignatureCertChainUrl")
+	certURL := request.Header.Get("SignatureCertChainUrl")
 
 	// Verify certificate URL
 	if !verifyCertURL(certURL) {
@@ -278,7 +366,7 @@ func IsValidAlexaRequest(w http.ResponseWriter, r *http.Request) bool {
 	}
 
 	// Fetch certificate data
-	certContents, err := readCert(certURL)
+	certContents, err := r.readCert(certURL)
 	if err != nil {
 		HTTPError(w, err.Error(), "Not Authorized", 401)
 		return false
@@ -318,18 +406,18 @@ func IsValidAlexaRequest(w http.ResponseWriter, r *http.Request) bool {
 
 	// Verify the key
 	publicKey := cert.PublicKey
-	encryptedSig, _ := base64.StdEncoding.DecodeString(r.Header.Get("Signature"))
+	encryptedSig, _ := base64.StdEncoding.DecodeString(request.Header.Get("Signature"))
 
 	// Make the request body SHA1 and verify the request with the public key
 	var bodyBuf bytes.Buffer
 	hash := sha1.New()
-	_, err = io.Copy(hash, io.TeeReader(r.Body, &bodyBuf))
+	_, err = io.Copy(hash, io.TeeReader(request.Body, &bodyBuf))
 	if err != nil {
 		HTTPError(w, err.Error(), "Internal Error", 500)
 		return false
 	}
 	//log.Println(bodyBuf.String())
-	r.Body = ioutil.NopCloser(&bodyBuf)
+	request.Body = ioutil.NopCloser(&bodyBuf)
 
 	err = rsa.VerifyPKCS1v15(publicKey.(*rsa.PublicKey), crypto.SHA1, hash.Sum(nil), encryptedSig)
 	if err != nil {
@@ -340,25 +428,15 @@ func IsValidAlexaRequest(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func readCert(certURL string) ([]byte, error) {
-	certPool, err := x509.SystemCertPool()
-	if err != nil || certPool == nil {
-		log.Println("Can't open system cert pools")
-	}
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: certPool, InsecureSkipVerify: insecureSkipVerify},
-	}
-	hc := &http.Client{Timeout: 2 * time.Second, Transport: tr}
-
-	cert, err := hc.Get(certURL)
+func (r RequestValidator) readCert(certURL string) ([]byte, error) {
+	cert, err := r.client.Get(certURL)
 	if err != nil {
-		return nil, errors.New("could not download Amazon cert file: " + err.Error())
+		return nil, fmt.Errorf("could not download Amazon cert file: %w", err)
 	}
 	defer cert.Body.Close()
 	certContents, err := ioutil.ReadAll(cert.Body)
 	if err != nil {
-		return nil, errors.New("could not read Amazon cert file: " + err.Error())
+		return nil, fmt.Errorf("could not read Amazon cert file: %w", err)
 	}
 
 	return certContents, nil
