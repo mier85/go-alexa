@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
@@ -48,9 +49,9 @@ type StdApplication struct {
 type requestContextKey string
 
 var (
-	applications       = map[string]interface{}{}
-	rootPrefix         = "/"
-	echoPrefix         = "/echo/"
+	applications = map[string]interface{}{}
+	rootPrefix   = "/"
+	echoPrefix   = "/echo/"
 )
 
 // SetEchoPrefix provides a way to specify a single path prefix that all EchoApplications will share.SetEchoPrefix
@@ -91,7 +92,7 @@ func WithRequestValidatorOptions(option RequestValidatorOption) Option {
 }
 
 // Run will initialize the apps provided and start an HTTP server listening on the specified port.
-func Run(apps map[string]interface{}, port string, options ...Option)  {
+func Run(apps map[string]interface{}, port string, options ...Option) {
 	router := mux.NewRouter()
 	if err := initialize(apps, router, options...); nil != err {
 		log.Fatal(err)
@@ -279,9 +280,9 @@ func verifyJSON(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 }
 
 type RequestValidator struct {
-	client *http.Client
+	client             *http.Client
 	insecureSkipVerify bool
-	timeout time.Duration
+	timeout            time.Duration
 }
 
 type RequestValidatorOption func(r *RequestValidator)
@@ -299,12 +300,18 @@ func WithInsecureSkipVerify(insecureSkipVerify bool) func(r *RequestValidator) {
 }
 
 func NewRequestValidator(options ...RequestValidatorOption) (RequestValidator, error) {
-	certPool, err := x509.SystemCertPool()
-	if err != nil {
-		return RequestValidator{}, fmt.Errorf("can't open system cert pool: %w", err)
-	}
-	if certPool == nil {
-		return RequestValidator{}, fmt.Errorf("certpool is empty")
+	var certPool *x509.CertPool
+	var err error
+
+	// ignore empty certPool under windows ( https://github.com/golang/go/issues/16736 )
+	if runtime.GOOS != "windows" {
+		certPool, err = x509.SystemCertPool()
+		if err != nil {
+			return RequestValidator{}, fmt.Errorf("can't open system cert pool: %w", err)
+		}
+		if certPool == nil {
+			return RequestValidator{}, fmt.Errorf("certpool is empty")
+		}
 	}
 
 	r := RequestValidator{
@@ -320,7 +327,7 @@ func NewRequestValidator(options ...RequestValidatorOption) (RequestValidator, e
 
 	if r.client == nil {
 		r.client = &http.Client{
-			Timeout:r.timeout,
+			Timeout:   r.timeout,
 			Transport: tr,
 		}
 	}
