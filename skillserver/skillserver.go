@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -71,28 +70,28 @@ type configurator struct {
 	requestValidatorOptions []RequestValidatorOption
 }
 
-func newConfigurator(options []SkillServerOption) *configurator {
+func newConfigurator(options []Option) *configurator {
 	c := &configurator{requestValidatorOptions: make([]RequestValidatorOption, 0)}
 	c.apply(options)
 	return c
 }
 
-func (c *configurator) apply(options []SkillServerOption) {
+func (c *configurator) apply(options []Option) {
 	for _, option := range options {
 		option(c)
 	}
 }
 
-type SkillServerOption func(c *configurator)
+type Option func(c *configurator)
 
-func WithRequestValidatorOptions(option RequestValidatorOption) SkillServerOption {
+func WithRequestValidatorOptions(option RequestValidatorOption) Option {
 	return func(c *configurator) {
 		c.requestValidatorOptions = append(c.requestValidatorOptions, option)
 	}
 }
 
 // Run will initialize the apps provided and start an HTTP server listening on the specified port.
-func Run(apps map[string]interface{}, port string, options ...SkillServerOption)  {
+func Run(apps map[string]interface{}, port string, options ...Option)  {
 	router := mux.NewRouter()
 	if err := initialize(apps, router, options...); nil != err {
 		log.Fatal(err)
@@ -111,7 +110,7 @@ func Run(apps map[string]interface{}, port string, options ...SkillServerOption)
 // logged to the stdout and no error is returned.
 // For generating a testing cert and key, read the following:
 // https://developer.amazon.com/docs/custom-skills/configure-web-service-self-signed-certificate.html
-func RunSSL(apps map[string]interface{}, port, cert, key string, options ...SkillServerOption) {
+func RunSSL(apps map[string]interface{}, port, cert, key string, options ...Option) {
 	router := mux.NewRouter()
 	if err := initialize(apps, router, options...); nil != err {
 		log.Fatal(err)
@@ -163,13 +162,8 @@ func RunSSL(apps map[string]interface{}, port, cert, key string, options ...Skil
 	log.Fatal(srv.ListenAndServeTLS(cert, key))
 }
 
-func initialize(apps map[string]interface{}, router *mux.Router, options ...SkillServerOption) error {
+func initialize(apps map[string]interface{}, router *mux.Router, options ...Option) error {
 	configurator := newConfigurator(options)
-	insecureSkipVerify := flag.Bool("insecure-skip-verify", false, "Skip certificate checks for downloading from AWS")
-	flag.Parse()
-	if *insecureSkipVerify == false {
-		log.Println("insecure skip verify, certs will not be checked")
-	}
 	applications = apps
 
 	// /echo/* Endpoints
@@ -221,9 +215,6 @@ func initialize(apps map[string]interface{}, router *mux.Router, options ...Skil
 			pageRouter.HandleFunc(uri, app.Handler).Methods(app.Methods)
 		}
 	}
-
-	// prepend with insecureSkipVerify flag so it can still be overwritten
-	configurator.requestValidatorOptions = append([]RequestValidatorOption{WithInsecureSkipVerify(*insecureSkipVerify)}, configurator.requestValidatorOptions...)
 
 	requestValidator, err := NewRequestValidator(
 		configurator.requestValidatorOptions...,
